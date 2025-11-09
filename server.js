@@ -78,6 +78,11 @@ async function getBalance(child) {
   return res.rows[0].balance;
 }
 
+async function getBalances() {
+  const [hana, nour] = await Promise.all([getBalance("hana"), getBalance("nour")]);
+  return { hana, nour };
+}
+
 async function getTransactions(child) {
   const res = await pool.query(
     "SELECT id, child, amount, reason, created_at FROM transactions WHERE child = $1 ORDER BY created_at DESC, id DESC",
@@ -137,11 +142,11 @@ app.get("/", async (req, res) => {
         <h2>Balances</h2>
         <div class="row">
           <div><strong>Hana</strong><div class="pill">EGP</div></div>
-          <div class="right"><strong>${money(hanaBal)}</strong></div>
+          <div class="right"><strong data-balance="hana">${money(hanaBal)}</strong></div>
         </div>
         <div class="row">
           <div><strong>Nour</strong><div class="pill">EGP</div></div>
-          <div class="right"><strong>${money(nourBal)}</strong></div>
+          <div class="right"><strong data-balance="nour">${money(nourBal)}</strong></div>
         </div>
       </div>
 
@@ -186,6 +191,27 @@ app.get("/", async (req, res) => {
 
       <script>
       const form = document.getElementById("txForm");
+
+      function updateBalances(balances) {
+        if (!balances) return;
+        const hanaEl = document.querySelector('[data-balance="hana"]');
+        const nourEl = document.querySelector('[data-balance="nour"]');
+        if (hanaEl && balances.hana !== undefined) {
+          hanaEl.textContent = Number(balances.hana).toFixed(2);
+        }
+        if (nourEl && balances.nour !== undefined) {
+          nourEl.textContent = Number(balances.nour).toFixed(2);
+        }
+      }
+
+      function ensureTxRows() {
+        const tbody = document.querySelector(".tx-table tbody");
+        if (!tbody) return;
+        if (!tbody.querySelector("tr")) {
+          tbody.innerHTML = '<tr><td colspan="6" class="center muted">No transactions yet</td></tr>';
+        }
+      }
+
       form.addEventListener("submit", async (e) => {
         e.preventDefault();
         const data = Object.fromEntries(new FormData(form).entries());
