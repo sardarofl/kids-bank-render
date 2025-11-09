@@ -62,9 +62,6 @@ function htmlPage(title, body) {
     .center { text-align: center; }
     .table-wrapper { overflow-x: auto; }
     .tx-table input, .tx-table select { width: 100%; }
-    .tx-actions { display: flex; gap: 6px; }
-    .tx-actions button { width: auto; }
-    button.danger { color: #a00; border-color: #a00; background: #fff; }
     .row-msg { font-size: 12px; margin-top: 4px; }
   </style>
 </head>
@@ -101,19 +98,18 @@ app.use(express.json());
 
 app.get("/", async (req, res) => {
   try {
-    const [balances, allTxs] = await Promise.all([
-      getBalances(),
+    const [hanaBal, nourBal, allTxs] = await Promise.all([
+      getBalance("hana"),
+      getBalance("nour"),
       pool.query(
         "SELECT id, child, amount, reason, created_at FROM transactions ORDER BY created_at DESC, id DESC LIMIT 50"
       ).then(r => r.rows)
     ]);
-    const hanaBal = balances.hana;
-    const nourBal = balances.nour;
     const txRows = allTxs.map(t => {
       const type = Number(t.amount) >= 0 ? "credit" : "debit";
       const absAmount = Math.abs(Number(t.amount));
       return `
-        <tr data-id="${t.id}" data-child="${t.child}" data-amount="${Number(t.amount)}">
+        <tr data-id="${t.id}">
           <td class="nowrap">${new Date(t.created_at).toLocaleString()}</td>
           <td>
             <select name="child">
@@ -130,10 +126,7 @@ app.get("/", async (req, res) => {
           <td><input type="number" step="0.01" min="0" name="amount" value="${absAmount.toFixed(2)}"></td>
           <td><input type="text" name="reason" value="${escapeHtml(t.reason || "")}"></td>
           <td class="nowrap">
-            <div class="tx-actions">
-              <button class="save-btn">Save</button>
-              <button class="delete-btn danger" type="button">Delete</button>
-            </div>
+            <button class="save-btn">Save</button>
             <div class="row-msg muted"></div>
           </td>
         </tr>
@@ -277,9 +270,6 @@ app.get("/", async (req, res) => {
             if (res.ok) {
               msg.textContent = "Saved";
               msg.className = "row-msg success";
-              row.dataset.child = child;
-              row.dataset.amount = amount;
-              updateBalances(j.balances);
             } else {
               msg.textContent = j.error || "Error";
               msg.className = "row-msg error";
@@ -289,54 +279,6 @@ app.get("/", async (req, res) => {
             msg.className = "row-msg error";
           } finally {
             btn.disabled = false;
-          }
-        });
-      });
-
-      document.querySelectorAll(".tx-table .delete-btn").forEach(btn => {
-        btn.addEventListener("click", async (e) => {
-          e.preventDefault();
-          const row = btn.closest("tr");
-          if (!row) return;
-          const id = row.dataset.id;
-          if (!id) return;
-          if (!window.confirm("Delete this transaction?")) return;
-          const msg = row.querySelector('.row-msg');
-          const saveBtn = row.querySelector('.save-btn');
-          btn.disabled = true;
-          if (saveBtn) saveBtn.disabled = true;
-          if (msg) {
-            msg.textContent = "Deleting...";
-            msg.className = "row-msg muted";
-          }
-          try {
-            const res = await fetch(\`/tx/\${id}\`, { method: "DELETE" });
-            const j = await res.json().catch(() => ({}));
-            if (res.ok) {
-              if (msg) {
-                msg.textContent = "Deleted";
-                msg.className = "row-msg success";
-              }
-              updateBalances(j.balances);
-              setTimeout(() => {
-                row.remove();
-                ensureTxRows();
-              }, 200);
-            } else {
-              if (msg) {
-                msg.textContent = j.error || "Error";
-                msg.className = "row-msg error";
-              }
-              btn.disabled = false;
-              if (saveBtn) saveBtn.disabled = false;
-            }
-          } catch (err) {
-            if (msg) {
-              msg.textContent = "Network error";
-              msg.className = "row-msg error";
-            }
-            btn.disabled = false;
-            if (saveBtn) saveBtn.disabled = false;
           }
         });
       });
@@ -396,7 +338,7 @@ app.post("/tx", async (req, res) => {
     const amt = Number(amount);
     if (!Number.isFinite(amt)) return res.status(400).json({ error: "Invalid amount" });
     await pool.query("INSERT INTO transactions (child, amount, reason) VALUES ($1, $2, $3)", [child, amt, reason ? String(reason) : null]);
-    res.json({ ok: true, balances: await getBalances() });
+    res.json({ ok: true });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Server error" });
@@ -417,20 +359,7 @@ app.put("/tx/:id", async (req, res) => {
       [child, amt, reason ? String(reason) : null, id]
     );
     if (result.rowCount === 0) return res.status(404).json({ error: "Not found" });
-    res.json({ ok: true, balances: await getBalances() });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-app.delete("/tx/:id", async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (!Number.isInteger(id)) return res.status(400).json({ error: "Invalid id" });
-    const result = await pool.query("DELETE FROM transactions WHERE id = $1 RETURNING id", [id]);
-    if (result.rowCount === 0) return res.status(404).json({ error: "Not found" });
-    res.json({ ok: true, balances: await getBalances() });
+    res.json({ ok: true });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Server error" });
