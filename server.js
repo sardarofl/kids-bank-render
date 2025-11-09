@@ -191,6 +191,43 @@ app.get("/", async (req, res) => {
       </div>
 
       <script>
+      function esc(s) {
+        return String(s || "")
+          .replace(/&/g,"&amp;")
+          .replace(/</g,"&lt;")
+          .replace(/>/g,"&gt;")
+          .replace(/"/g,"&quot;")
+          .replace(/'/g,"&#39;");
+      }
+      function rowHtml(t) {
+        const type = Number(t.amount) >= 0 ? "credit" : "debit";
+        const absAmount = Math.abs(Number(t.amount)).toFixed(2);
+        return \`
+          <tr data-id="\${t.id}">
+            <td class="nowrap">\${new Date(t.created_at).toLocaleString()}</td>
+            <td>
+              <select name="child">
+                <option value="hana" \${t.child === "hana" ? "selected" : ""}>Hana</option>
+                <option value="nour" \${t.child === "nour" ? "selected" : ""}>Nour</option>
+              </select>
+            </td>
+            <td>
+              <select name="type">
+                <option value="credit" \${type === "credit" ? "selected" : ""}>Credit (+)</option>
+                <option value="debit"  \${type === "debit"  ? "selected" : ""}>Debit (−)</option>
+              </select>
+            </td>
+            <td><input type="number" step="0.01" min="0" name="amount" value="\${absAmount}"></td>
+            <td><input type="text" name="reason" value="\${esc(t.reason)}"></td>
+            <td class="nowrap">
+              <button class="save-btn">Save</button>
+              <button class="delete-btn">Delete</button>
+              <div class="row-msg muted"></div>
+            </td>
+          </tr>
+        \`;
+      }
+
       const form = document.getElementById("txForm");
 
       async function fetchBalances() {
@@ -239,70 +276,38 @@ app.get("/", async (req, res) => {
           if (r.ok) {
             msg.textContent = "Saved";
             msg.className = "success";
-            await fetchBalances();         // refresh top numbers
-            form.reset();                  // clear inputs
-            ensureTxRows();                // keep table placeholder tidy
-          } else {
-            msg.textContent = j.error || "Error";
-            msg.className = "error";
+            await fetchBalances();
+            if (j.tx) {
+              const tbody = document.querySelector(".tx-table tbody");
+              const first = tbody.querySelector("tr .center.muted");
+              if (first) first.closest("tr").remove();
+              tbody.insertAdjacentHTML("afterbegin", rowHtml(j.tx));
+
+            }
+            form.reset();
+            ensureTxRows();
+            return;
           }
         } catch (err) {
           document.getElementById("msg").textContent = "Network error";
         }
       });
 
-      document.querySelectorAll(".tx-table .save-btn").forEach(btn => {
-        btn.addEventListener("click", async (e) => {
-          e.preventDefault();
-          const row = btn.closest("tr");
-          const id = row.dataset.id;
-          const child = row.querySelector('[name="child"]').value;
-          const type = row.querySelector('[name="type"]').value;
-          const amountInput = row.querySelector('[name="amount"]');
-          const reason = row.querySelector('[name="reason"]').value;
-          const msg = row.querySelector('.row-msg');
-          const rawAmount = Number(amountInput.value);
-          if (!Number.isFinite(rawAmount) || rawAmount < 0) {
-            msg.textContent = "Invalid amount";
-            msg.className = "row-msg error";
-            return;
-          }
-          const amount = type === "debit" ? -Math.abs(rawAmount) : Math.abs(rawAmount);
-          btn.disabled = true;
-          msg.textContent = "Saving...";
-          msg.className = "row-msg muted";
-          try {
-            const res = await fetch(\`/tx/\${id}\`, {
-              method: "PUT",
-              headers: {"Content-Type":"application/json"},
-              body: JSON.stringify({ child, amount, reason })
-            });
-            const j = await res.json().catch(() => ({}));
-            if (res.ok) {
-              msg.textContent = "Saved";
-              msg.className = "row-msg success";
-              await fetchBalances();         // update Hana and Nour balances
-            } else {
-              msg.textContent = j.error || "Error";
-              msg.className = "row-msg error";
-            }
-          } catch (err) {
-            msg.textContent = "Network error";
-            msg.className = "row-msg error";
-          } finally {
-            btn.disabled = false;
-          }
-        });
-        
-      });
-      document.querySelectorAll(".tx-table .delete-btn").forEach(btn => {
-        btn.addEventListener("click", async (e) => {
-          e.preventDefault();
-          const row = btn.closest("tr");
-          const id = row.dataset.id;
-          const msg = row.querySelector(".row-msg");
+      const tbody = document.querySelector(".tx-table tbody");
+
+      tbody.addEventListener("click", async (e) => {
+        const row = e.target.closest("tr");
+        if (!row) return;
+
+        const saveBtn = e.target.closest(".save-btn");
+        const delBtn  = e.target.closest(".delete-btn");
+        const id = Number(row.dataset.id);
+        const msg = row.querySelector(".row-msg");
+
+        // delete
+        if (delBtn) {
           if (!confirm("Delete this transaction?")) return;
-          btn.disabled = true;
+          delBtn.disabled = true;
           msg.textContent = "Deleting...";
           msg.className = "row-msg muted";
           try {
@@ -316,14 +321,50 @@ app.get("/", async (req, res) => {
               msg.textContent = j.error || "Error";
               msg.className = "row-msg error";
             }
-          } catch (err) {
-            msg.textContent = "Network error";
-            msg.className = "row-msg error";
           } finally {
-            btn.disabled = false;
+            delBtn.disabled = false;
           }
-        });
+          return;
+        }
+
+        // save
+        if (saveBtn) {
+          const child = row.querySelector('[name="child"]').value;
+          const type  = row.querySelector('[name="type"]').value;
+          const amtIn = Number(row.querySelector('[name="amount"]').value);
+          const reason = row.querySelector('[name="reason"]').value;
+
+          if (!Number.isFinite(amtIn) || amtIn < 0) {
+            msg.textContent = "Invalid amount";
+            msg.className = "row-msg error";
+            return;
+          }
+          const amount = type === "debit" ? -Math.abs(amtIn) : Math.abs(amtIn);
+
+          saveBtn.disabled = true;
+          msg.textContent = "Saving...";
+          msg.className = "row-msg muted";
+          try {
+            const res = await fetch(\`/tx/\${id}\`, {
+              method: "PUT",
+              headers: { "Content-Type":"application/json" },
+              body: JSON.stringify({ child, amount, reason })
+            });
+            const j = await res.json().catch(() => ({}));
+            if (res.ok) {
+              msg.textContent = "Saved";
+              msg.className = "row-msg success";
+              await fetchBalances();
+            } else {
+              msg.textContent = j.error || "Error";
+              msg.className = "row-msg error";
+            }
+          } finally {
+            saveBtn.disabled = false;
+          }
+        }
       });
+
 
       </script>
     `;
@@ -380,13 +421,19 @@ app.post("/tx", async (req, res) => {
     if (!["hana", "nour"].includes(child)) return res.status(400).json({ error: "Invalid child" });
     const amt = Number(amount);
     if (!Number.isFinite(amt)) return res.status(400).json({ error: "Invalid amount" });
-    await pool.query("INSERT INTO transactions (child, amount, reason) VALUES ($1, $2, $3)", [child, amt, reason ? String(reason) : null]);
-    res.json({ ok: true });
+
+    const r = await pool.query(
+      "INSERT INTO transactions (child, amount, reason) VALUES ($1, $2, $3) RETURNING id, child, amount, reason, created_at",
+      [child, amt, reason ? String(reason) : null]
+    );
+
+    res.json({ ok: true, tx: r.rows[0] });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Server error" });
   }
 });
+
 
 app.put("/tx/:id", async (req, res) => {
   try {
