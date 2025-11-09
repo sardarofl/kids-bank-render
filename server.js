@@ -2,16 +2,12 @@
 // Single file Express app with Postgres
 // Usage
 // 1. Set DATABASE_URL env var from Render Postgres
-// 2. Optional ADMIN_PASSWORD to protect write actions
-// 3. Start with: node server.js
+// 2. Start with: node server.js
 
 const express = require("express");
 const { Pool } = require("pg");
-const path = require("path");
 
 const PORT = process.env.PORT || 3000;
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || ""; // empty means no auth
-
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL && process.env.DATABASE_URL.includes("render.com") ? { rejectUnauthorized: false } : false
@@ -27,6 +23,16 @@ async function init() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+}
+
+function escapeHtml(str = "") {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+    .replace(/\n/g, "&#10;");
 }
 
 function htmlPage(title, body) {
@@ -54,6 +60,9 @@ function htmlPage(title, body) {
     .right { text-align: right; }
     .nowrap { white-space: nowrap; }
     .center { text-align: center; }
+    .table-wrapper { overflow-x: auto; }
+    .tx-table input, .tx-table select { width: 100%; }
+    .row-msg { font-size: 12px; margin-top: 4px; }
   </style>
 </head>
 <body>
@@ -84,7 +93,40 @@ app.use(express.json());
 
 app.get("/", async (req, res) => {
   try {
-    const [hanaBal, nourBal] = await Promise.all([getBalance("hana"), getBalance("nour")]);
+    const [hanaBal, nourBal, allTxs] = await Promise.all([
+      getBalance("hana"),
+      getBalance("nour"),
+      pool.query(
+        "SELECT id, child, amount, reason, created_at FROM transactions ORDER BY created_at DESC, id DESC LIMIT 50"
+      ).then(r => r.rows)
+    ]);
+    const txRows = allTxs.map(t => {
+      const type = Number(t.amount) >= 0 ? "credit" : "debit";
+      const absAmount = Math.abs(Number(t.amount));
+      return `
+        <tr data-id="${t.id}">
+          <td class="nowrap">${new Date(t.created_at).toLocaleString()}</td>
+          <td>
+            <select name="child">
+              <option value="hana" ${t.child === "hana" ? "selected" : ""}>Hana</option>
+              <option value="nour" ${t.child === "nour" ? "selected" : ""}>Nour</option>
+            </select>
+          </td>
+          <td>
+            <select name="type">
+              <option value="credit" ${type === "credit" ? "selected" : ""}>Credit (+)</option>
+              <option value="debit" ${type === "debit" ? "selected" : ""}>Debit (−)</option>
+            </select>
+          </td>
+          <td><input type="number" step="0.01" min="0" name="amount" value="${absAmount.toFixed(2)}"></td>
+          <td><input type="text" name="reason" value="${escapeHtml(t.reason || "")}"></td>
+          <td class="nowrap">
+            <button class="save-btn">Save</button>
+            <div class="row-msg muted"></div>
+          </td>
+        </tr>
+      `;
+    }).join("");
     const body = `
       <div class="tabs">
         <a class="tab" href="/bank/hana">Hana statement</a>
@@ -114,10 +156,13 @@ app.get("/", async (req, res) => {
           </label>
           <div class="row">
             <label>Amount
-              <input type="number" step="0.01" name="amount" placeholder="Positive for add, negative for subtract" required>
+              <input type="number" step="0.01" min="0" name="amount" placeholder="Enter amount" required>
             </label>
-            <label class="${ADMIN_PASSWORD ? '' : 'muted'}">Admin password ${ADMIN_PASSWORD ? '' : '(not set)'} 
-              <input type="password" name="password" ${ADMIN_PASSWORD ? 'required' : ''} placeholder="${ADMIN_PASSWORD ? 'Enter password' : 'Optional'}">
+            <label>Type
+              <select name="type" required>
+                <option value="credit">Credit (+)</option>
+                <option value="debit">Debit (−)</option>
+              </select>
             </label>
           </div>
           <label>Reason <textarea name="reason" placeholder="Gift, chores, purchase, etc" rows="2"></textarea></label>
@@ -126,13 +171,34 @@ app.get("/", async (req, res) => {
         </form>
       </div>
 
+      <div class="card">
+        <h2>Recent transactions</h2>
+        <p class="muted">Edit the latest 50 records directly below.</p>
+        <div class="table-wrapper">
+          <table class="tx-table">
+            <thead>
+              <tr><th>Date</th><th>Child</th><th>Type</th><th>Amount</th><th>Reason</th><th class="nowrap">Actions</th></tr>
+            </thead>
+            <tbody>${txRows || '<tr><td colspan="6" class="center muted">No transactions yet</td></tr>'}</tbody>
+          </table>
+        </div>
+      </div>
+
       <script>
       const form = document.getElementById("txForm");
       form.addEventListener("submit", async (e) => {
         e.preventDefault();
         const data = Object.fromEntries(new FormData(form).entries());
+        const baseAmount = Number(data.amount);
+        if (!Number.isFinite(baseAmount) || baseAmount < 0) {
+          document.getElementById("msg").textContent = "Enter a valid amount";
+          document.getElementById("msg").className = "error";
+          return;
+        }
+        const signedAmount = data.type === "debit" ? -Math.abs(baseAmount) : Math.abs(baseAmount);
+        const payload = { child: data.child, amount: signedAmount, reason: data.reason };
         try {
-          const r = await fetch("/tx", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(data) });
+          const r = await fetch("/tx", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(payload) });
           const j = await r.json();
           const msg = document.getElementById("msg");
           if (r.ok) {
@@ -146,6 +212,49 @@ app.get("/", async (req, res) => {
         } catch (err) {
           document.getElementById("msg").textContent = "Network error";
         }
+      });
+
+      document.querySelectorAll(".tx-table .save-btn").forEach(btn => {
+        btn.addEventListener("click", async (e) => {
+          e.preventDefault();
+          const row = btn.closest("tr");
+          const id = row.dataset.id;
+          const child = row.querySelector('[name="child"]').value;
+          const type = row.querySelector('[name="type"]').value;
+          const amountInput = row.querySelector('[name="amount"]');
+          const reason = row.querySelector('[name="reason"]').value;
+          const msg = row.querySelector('.row-msg');
+          const rawAmount = Number(amountInput.value);
+          if (!Number.isFinite(rawAmount) || rawAmount < 0) {
+            msg.textContent = "Invalid amount";
+            msg.className = "row-msg error";
+            return;
+          }
+          const amount = type === "debit" ? -Math.abs(rawAmount) : Math.abs(rawAmount);
+          btn.disabled = true;
+          msg.textContent = "Saving...";
+          msg.className = "row-msg muted";
+          try {
+            const res = await fetch(\`/tx/\${id}\`, {
+              method: "PUT",
+              headers: {"Content-Type":"application/json"},
+              body: JSON.stringify({ child, amount, reason })
+            });
+            const j = await res.json().catch(() => ({}));
+            if (res.ok) {
+              msg.textContent = "Saved";
+              msg.className = "row-msg success";
+            } else {
+              msg.textContent = j.error || "Error";
+              msg.className = "row-msg error";
+            }
+          } catch (err) {
+            msg.textContent = "Network error";
+            msg.className = "row-msg error";
+          } finally {
+            btn.disabled = false;
+          }
+        });
       });
       </script>
     `;
@@ -165,7 +274,7 @@ app.get("/bank/:child", async (req, res) => {
       <tr>
         <td class="nowrap">${new Date(t.created_at).toLocaleString()}</td>
         <td class="right">${money(t.amount)}</td>
-        <td>${t.reason ? t.reason.replace(/</g, "&lt;") : ""}</td>
+        <td>${t.reason ? escapeHtml(t.reason).replace(/&#10;/g, "<br>") : ""}</td>
       </tr>
     `).join("");
     const body = `
@@ -197,13 +306,33 @@ app.get("/bank/:child", async (req, res) => {
 // Create transaction endpoint
 app.post("/tx", async (req, res) => {
   try {
-    const { child, amount, reason, password } = req.body || {};
-    if (!child || !amount) return res.status(400).json({ error: "Missing fields" });
+    const { child, amount, reason } = req.body || {};
+    if (!child || amount === undefined || amount === null) return res.status(400).json({ error: "Missing fields" });
     if (!["hana", "nour"].includes(child)) return res.status(400).json({ error: "Invalid child" });
     const amt = Number(amount);
     if (!Number.isFinite(amt)) return res.status(400).json({ error: "Invalid amount" });
-    if (ADMIN_PASSWORD && password !== ADMIN_PASSWORD) return res.status(403).json({ error: "Wrong password" });
-    await pool.query("INSERT INTO transactions (child, amount, reason) VALUES ($1, $2, $3)", [child, amt, reason || null]);
+    await pool.query("INSERT INTO transactions (child, amount, reason) VALUES ($1, $2, $3)", [child, amt, reason ? String(reason) : null]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.put("/tx/:id", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: "Invalid id" });
+    const { child, amount, reason } = req.body || {};
+    if (!child || amount === undefined || amount === null) return res.status(400).json({ error: "Missing fields" });
+    if (!["hana", "nour"].includes(child)) return res.status(400).json({ error: "Invalid child" });
+    const amt = Number(amount);
+    if (!Number.isFinite(amt)) return res.status(400).json({ error: "Invalid amount" });
+    const result = await pool.query(
+      "UPDATE transactions SET child = $1, amount = $2, reason = $3 WHERE id = $4 RETURNING id",
+      [child, amt, reason ? String(reason) : null, id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: "Not found" });
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
