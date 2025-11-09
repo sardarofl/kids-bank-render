@@ -127,6 +127,7 @@ app.get("/", async (req, res) => {
           <td><input type="text" name="reason" value="${escapeHtml(t.reason || "")}"></td>
           <td class="nowrap">
             <button class="save-btn">Save</button>
+            <button class="delete-btn">Delete</button>
             <div class="row-msg muted"></div>
           </td>
         </tr>
@@ -192,6 +193,14 @@ app.get("/", async (req, res) => {
       <script>
       const form = document.getElementById("txForm");
 
+      async function fetchBalances() {
+        try {
+          const r = await fetch("/balances");
+          const j = await r.json();
+          updateBalances(j);
+        } catch {}
+      }
+
       function updateBalances(balances) {
         if (!balances) return;
         const hanaEl = document.querySelector('[data-balance="hana"]');
@@ -230,7 +239,9 @@ app.get("/", async (req, res) => {
           if (r.ok) {
             msg.textContent = "Saved";
             msg.className = "success";
-            setTimeout(() => location.reload(), 700);
+            await fetchBalances();         // refresh top numbers
+            form.reset();                  // clear inputs
+            ensureTxRows();                // keep table placeholder tidy
           } else {
             msg.textContent = j.error || "Error";
             msg.className = "error";
@@ -270,6 +281,37 @@ app.get("/", async (req, res) => {
             if (res.ok) {
               msg.textContent = "Saved";
               msg.className = "row-msg success";
+              await fetchBalances();         // update Hana and Nour balances
+            } else {
+              msg.textContent = j.error || "Error";
+              msg.className = "row-msg error";
+            }
+          } catch (err) {
+            msg.textContent = "Network error";
+            msg.className = "row-msg error";
+          } finally {
+            btn.disabled = false;
+          }
+        });
+        
+      });
+      document.querySelectorAll(".tx-table .delete-btn").forEach(btn => {
+        btn.addEventListener("click", async (e) => {
+          e.preventDefault();
+          const row = btn.closest("tr");
+          const id = row.dataset.id;
+          const msg = row.querySelector(".row-msg");
+          if (!confirm("Delete this transaction?")) return;
+          btn.disabled = true;
+          msg.textContent = "Deleting...";
+          msg.className = "row-msg muted";
+          try {
+            const res = await fetch(\`/tx/\${id}\`, { method: "DELETE" });
+            const j = await res.json().catch(() => ({}));
+            if (res.ok) {
+              row.remove();
+              await fetchBalances();
+              ensureTxRows();
             } else {
               msg.textContent = j.error || "Error";
               msg.className = "row-msg error";
@@ -282,6 +324,7 @@ app.get("/", async (req, res) => {
           }
         });
       });
+
       </script>
     `;
     res.send(htmlPage("Kids Bank admin", body));
@@ -365,6 +408,31 @@ app.put("/tx/:id", async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
+
+// quick balances api used by the front end to refresh numbers
+app.get("/balances", async (req, res) => {
+  try {
+    const balances = await getBalances();
+    res.json(balances);
+  } catch (e) {
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// delete transaction by id
+app.delete("/tx/:id", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: "Invalid id" });
+    const r = await pool.query("DELETE FROM transactions WHERE id = $1", [id]);
+    if (r.rowCount === 0) return res.status(404).json({ error: "Not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
 
 init().then(() => {
   app.listen(PORT, () => console.log(`Kids Bank listening on ${PORT}`));
